@@ -1,5 +1,15 @@
 import pygame
 import os
+import sys
+
+
+def resource_path(relative_path):
+    """PyInstaller 번들 및 일반 실행 모두에서 올바른 절대 경로를 반환합니다."""
+    if hasattr(sys, '_MEIPASS'):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, relative_path)
 
 class MenuGUI:
     # 상수 정의 (가독성을 위해)
@@ -23,10 +33,9 @@ class MenuGUI:
         self.screen_width = screen_width
         self.screen_height = screen_height
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(base_dir, ''))
+        project_root = resource_path("")
 
-        font_path = os.path.join(project_root, "assets", "fonts", "OTF", "MaruBuri-Regular.otf")
+        font_path = resource_path(os.path.join("assets", "fonts", "OTF", "MaruBuri-Regular.otf"))
 
         if not os.path.exists(font_path):
             print(f"경고: 폰트 파일이 없습니다: {font_path}. 기본 폰트로 대체합니다.")
@@ -47,7 +56,7 @@ class MenuGUI:
 
         # 배경 이미지
         self.background_image = None
-        background_path = os.path.join('assets', 'main_menu.png')
+        background_path = resource_path(os.path.join('assets', 'main_menu.png'))
         if os.path.exists(background_path):
              self.background_image = pygame.image.load(background_path).convert_alpha()
              self.background_image = pygame.transform.scale(self.background_image, (screen_width, screen_height))
@@ -55,7 +64,7 @@ class MenuGUI:
         self.start_button_rect = pygame.Rect(self.screen_width // 2 - 100, self.screen_height // 2 - 25, 200, 50)
 
         # 아이콘 설정
-        icon_image_path = os.path.join('assets', 'main_menu.png')
+        icon_image_path = resource_path(os.path.join('assets', 'main_menu.png'))
 
         # 파일 존재 여부 확인
         if os.path.exists(icon_image_path):
@@ -108,7 +117,7 @@ class MenuGUI:
         ]
 
         self.card_images_loaded = {}
-        assets_card_path = os.path.join(project_root, "assets", "cards")
+        assets_card_path = resource_path(os.path.join("assets", "cards"))
         for card_info in descriptions:
             img_path = os.path.join(assets_card_path, card_info["image"])
             try:
@@ -125,7 +134,7 @@ class MenuGUI:
         return descriptions
 
     def load_assets(self, project_root):
-        assets_dir = os.path.join(project_root, "assets")
+        assets_dir = resource_path("assets")
         images_dir = os.path.join(assets_dir, "images")
 
         # 화살표 이미지 로드 (예시 경로, 실제 경로에 맞게 수정 필요)

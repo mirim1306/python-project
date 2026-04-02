@@ -1,5 +1,16 @@
 import pygame
 import os
+import sys
+
+
+def resource_path(relative_path):
+    """PyInstaller 번들 및 일반 실행 모두에서 올바른 절대 경로를 반환합니다."""
+    if hasattr(sys, '_MEIPASS'):
+        base = sys._MEIPASS
+    else:
+        # CardGUI.py는 CardGame/ 폴더 안에 있으므로 부모(프로젝트 루트)를 base로 사용
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative_path)
 
 class CardBattleGUI:
     def __init__(self, screen, players):
@@ -19,7 +30,7 @@ class CardBattleGUI:
         self.YELLOW = (255, 255, 0)
         self.LIGHT_BLUE = (173, 216, 230)  # 카드 공개 배경색
 
-        self.font_path = os.path.join(os.path.dirname(__file__), '..', 'assets', 'fonts', 'OTF', 'MaruBuri-Regular.otf')
+        self.font_path = resource_path(os.path.join("assets", "fonts", "OTF", "MaruBuri-Regular.otf"))
         try:
             self.large_font = pygame.font.Font(self.font_path, 38)
             self.medium_font = pygame.font.Font(self.font_path, 22)
@@ -63,7 +74,7 @@ class CardBattleGUI:
 
     def _load_image(self, path, size=None):
         try:
-            full_path = os.path.join(os.path.dirname(__file__), '..', path)
+            full_path = resource_path(path)
             image = pygame.image.load(full_path).convert_alpha()
             if size:
                 image = pygame.transform.scale(image, size)

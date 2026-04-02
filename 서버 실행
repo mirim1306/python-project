@@ -1,0 +1,5 @@
+python Server.py
+
+pyinstaller --onefile --noconsole --add-data "assets;assets" --add-data "CardGame;CardGame" --add-data "Chess;Chess" --add-data "ChessGUI;ChessGUI" ChessCard.py
+
+pyinstaller --onefile Server.py

@@ -1,5 +1,16 @@
 import pygame
 import os
+import sys
+
+
+def resource_path(relative_path):
+    """PyInstaller 번들 및 일반 실행 모두에서 올바른 절대 경로를 반환합니다."""
+    if hasattr(sys, '_MEIPASS'):
+        base = sys._MEIPASS
+    else:
+        # ChessGUI.py는 ChessGUI/ 폴더 안에 있으므로 부모(프로젝트 루트)를 base로 사용
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative_path)
 
 class ChessGUI:
     def __init__(self, chess_game, screen):
@@ -19,10 +30,8 @@ class ChessGUI:
         self.selected_pos = None  # 선택된 기물의 보드 위치 (row, col)
         self.valid_moves = []
 
-        # 폰트 경로 설정 (이전 수정안에서 더 견고하게 만든 경로 사용)
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.join(base_dir, '..')
-        self.font_path = os.path.join(project_root, "assets", "fonts", "OTF", "MaruBuri-Regular.otf")
+        # 폰트 경로 설정
+        self.font_path = resource_path(os.path.join("assets", "fonts", "OTF", "MaruBuri-Regular.otf"))
 
         print(f"DEBUG: Attempting to load font from: {self.font_path}")
 
@@ -68,11 +77,9 @@ class ChessGUI:
     def load_images(self):
         pieces = ['wp', 'wr', 'wn', 'wb', 'wq', 'wk', 'bp', 'br', 'bn', 'bb', 'bq', 'bk']
         images = {}
-        base_path = os.path.dirname(os.path.abspath(__file__))
-        # assets 폴더 경로 조정 (ChessGUI/assets -> ChessGUI/../assets)
-        assets_path = os.path.join(base_path, '..', 'assets')
+        base_path = resource_path("assets")
         for piece in pieces:
-            path = os.path.join(assets_path, f"{piece}.png")
+            path = os.path.join(base_path, f"{piece}.png")
             if not os.path.exists(path):
                 print(f"Warning: Image not found at {path}")
                 continue

@@ -8,7 +8,7 @@ try:
 except ImportError:
     websocket = None
 
-SERVER_URL = "wss://chess-server-xxxx.onrender.com"  # Render 배포 후 실제 URL로 교체
+SERVER_URL = "ws://172.30.3.45:10000"
 
 
 class NetworkClient:

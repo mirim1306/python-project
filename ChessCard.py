@@ -3,6 +3,30 @@ import sys
 import threading
 import copy
 import os
+import subprocess
+
+def run_server():
+    try:
+        current_dir = os.path.dirname(sys.executable)  # 👈 핵심
+        server_path = os.path.join(current_dir, "Server.exe")
+
+        print("서버 경로:", server_path)
+
+        if os.path.exists(server_path):
+            subprocess.Popen(server_path, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            print("Server.exe not found")
+    except Exception as e:
+        print("Server 실행 오류:", e)
+
+def resource_path(relative_path):
+    """PyInstaller 번들 및 일반 실행 모두에서 올바른 절대 경로를 반환합니다."""
+    if hasattr(sys, '_MEIPASS'):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, relative_path)
+
 
 from MenuGUI import MenuGUI
 from CardGame.CardBattle import CardBattle
@@ -42,9 +66,7 @@ def main():
     clock = pygame.time.Clock()
 
     # 폰트 로드
-    import os
-    _base = os.path.dirname(os.path.abspath(__file__))
-    _font_path = os.path.join(_base, "assets", "fonts", "OTF", "MaruBuri-Regular.otf")
+    _font_path = resource_path(os.path.join("assets", "fonts", "OTF", "MaruBuri-Regular.otf"))
     def load_font(size):
         try:
             return pygame.font.Font(_font_path, size)
@@ -530,4 +552,5 @@ def main():
 
 
 if __name__ == "__main__":
+    run_server()
     main()
