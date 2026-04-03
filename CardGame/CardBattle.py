@@ -100,7 +100,7 @@ class CardBattle:
             if self.net and self.net.connected:
                 for msg in self.net.poll():
                     if msg.get("type") == "card_action":
-                        self._net_opponent_card_name = msg.get("card_name")
+                        self._net_opponent_card_name = str(msg.get("card_idx", -1))
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -155,36 +155,42 @@ class CardBattle:
             else:
                 self.game_log.append("플레이어: 시간 초과 → 카드 없음.")
 
-        # ── 멀티넷: 내 카드 전송 후 상대 카드 수신 대기 ──────────────────
+        # ── 멀티넷: 내 카드 전송 후 상대 카드 수신 대기 ────────────────
         if self.net and self.net.connected:
-            card_name = self.player_played_card.name if self.player_played_card else "none"
-            self.net.send_card_action({"card_name": card_name})
+            # 내 카드 정보 전송 (카드 전체 정보를 dict로)
+            if self.player_played_card:
+                card_data = self.player_played_card.to_dict()
+            else:
+                card_data = None
+            self.net.send_card_action({"card_data": card_data})
 
             # 상대 카드가 올 때까지 대기 (최대 15초)
             wait_start = pygame.time.get_ticks()
             while self._net_opponent_card_name is None:
                 if pygame.time.get_ticks() - wait_start > 15000:
+                    self._net_opponent_card_name = "timeout"
                     break
                 for msg in self.net.poll():
                     if msg.get("type") == "card_action":
-                        self._net_opponent_card_name = msg.get("card_name")
-                pygame.time.wait(50)
+                        self._net_opponent_card_name = msg.get("card_data", "timeout")
+                # pygame 이벤트 처리 (화면 멈춤 방지)
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self._net_opponent_card_name = "timeout"
+                        break
+                pygame.time.wait(30)
 
-            # 수신한 카드명으로 상대 카드 설정
-            opp_card_name = self._net_opponent_card_name
+            opp_card_data = self._net_opponent_card_name
             self._net_opponent_card_name = None  # 초기화
 
-            if opp_card_name and opp_card_name != "none":
-                # 상대 손패에서 해당 카드 찾아서 사용
-                opp_idx = next(
-                    (i for i, c in enumerate(self.opponent.hand) if c.name == opp_card_name),
-                    None
+            if opp_card_data and opp_card_data != "timeout" and isinstance(opp_card_data, dict):
+                self.opponent_played_card = Card(
+                    name=opp_card_data["name"],
+                    power=opp_card_data["power"],
+                    effect_type=opp_card_data["effect_type"],
+                    description=opp_card_data["description"],
+                    effect=opp_card_data.get("effect")
                 )
-                if opp_idx is not None:
-                    self.opponent_played_card = self.opponent.play_card(opp_idx)
-                else:
-                    # 손패에 없으면 첫 번째 카드 사용
-                    self.opponent_played_card = self.opponent.play_card(0) if self.opponent.hand else None
             else:
                 self.opponent_played_card = None
             self.game_log.append(f"상대방: '{self.opponent_played_card.name if self.opponent_played_card else '없음'}' 카드 사용.")
