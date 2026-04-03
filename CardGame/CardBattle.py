@@ -1,15 +1,17 @@
 import pygame
 import random
 
-from CardGame.Card import Card, SpecialEffectProcessor, Player
-from CardGame.CardGUI import CardBattleGUI
+from .Card import Card, SpecialEffectProcessor, Player
+from .CardGUI import CardBattleGUI
 
 
 class CardBattle:
     def __init__(self, screen, player_piece_type, opponent_piece_type,
                  player_color="white", opponent_color="black",
-                 player_ally_pieces=None, opponent_ally_pieces=None):
+                 player_ally_pieces=None, opponent_ally_pieces=None,
+                 net=None):
         self.screen = screen
+        self.net = net  # 멀티넷용 NetworkClient (None이면 싱글/AI)
         self.player = SpecialEffectProcessor.create_player(player_piece_type, "Player", player_color)
         self.opponent = SpecialEffectProcessor.create_player(opponent_piece_type, "Opponent", opponent_color)
 
@@ -36,6 +38,7 @@ class CardBattle:
         self.dead_summoned_pieces = []
 
         self.game_log = []
+        self._net_opponent_card_name = None  # 네트워크로 수신한 상대 카드명
         self._start_new_turn()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -93,6 +96,12 @@ class CardBattle:
             time_left = max(0.0,
                 self.turn_time_limit - (pygame.time.get_ticks() - self.timer_start_time) / 1000)
 
+            # 네트워크 메시지 폴링 (멀티넷)
+            if self.net and self.net.connected:
+                for msg in self.net.poll():
+                    if msg.get("type") == "card_action":
+                        self._net_opponent_card_name = msg.get("card_name")
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return "quit"
@@ -146,14 +155,50 @@ class CardBattle:
             else:
                 self.game_log.append("플레이어: 시간 초과 → 카드 없음.")
 
-        opponent_stunned = self.opponent.is_status_active('stun')
-        if not opponent_stunned and self.opponent.hand:
-            opp_idx = self._opponent_ai_choose()
-            self.opponent_played_card = self.opponent.play_card(opp_idx)
-            self.game_log.append(f"상대방: '{self.opponent_played_card.name}' 카드 사용.")
+        # ── 멀티넷: 내 카드 전송 후 상대 카드 수신 대기 ──────────────────
+        if self.net and self.net.connected:
+            card_name = self.player_played_card.name if self.player_played_card else "none"
+            self.net.send_card_action({"card_name": card_name})
+
+            # 상대 카드가 올 때까지 대기 (최대 15초)
+            wait_start = pygame.time.get_ticks()
+            while self._net_opponent_card_name is None:
+                if pygame.time.get_ticks() - wait_start > 15000:
+                    break
+                for msg in self.net.poll():
+                    if msg.get("type") == "card_action":
+                        self._net_opponent_card_name = msg.get("card_name")
+                pygame.time.wait(50)
+
+            # 수신한 카드명으로 상대 카드 설정
+            opp_card_name = self._net_opponent_card_name
+            self._net_opponent_card_name = None  # 초기화
+
+            if opp_card_name and opp_card_name != "none":
+                # 상대 손패에서 해당 카드 찾아서 사용
+                opp_idx = next(
+                    (i for i, c in enumerate(self.opponent.hand) if c.name == opp_card_name),
+                    None
+                )
+                if opp_idx is not None:
+                    self.opponent_played_card = self.opponent.play_card(opp_idx)
+                else:
+                    # 손패에 없으면 첫 번째 카드 사용
+                    self.opponent_played_card = self.opponent.play_card(0) if self.opponent.hand else None
+            else:
+                self.opponent_played_card = None
+            self.game_log.append(f"상대방: '{self.opponent_played_card.name if self.opponent_played_card else '없음'}' 카드 사용.")
+
+        # ── 싱글/로컬: AI가 카드 선택 ────────────────────────────────────
         else:
-            self.opponent_played_card = None
-            self.game_log.append("상대방: 스턴 or 손패 없음 → 카드 없음.")
+            opponent_stunned = self.opponent.is_status_active('stun')
+            if not opponent_stunned and self.opponent.hand:
+                opp_idx = self._opponent_ai_choose()
+                self.opponent_played_card = self.opponent.play_card(opp_idx)
+                self.game_log.append(f"상대방: '{self.opponent_played_card.name}' 카드 사용.")
+            else:
+                self.opponent_played_card = None
+                self.game_log.append("상대방: 스턴 or 손패 없음 → 카드 없음.")
 
         self.gui.draw(
             "Player", 0,

@@ -3,21 +3,7 @@ import sys
 import threading
 import copy
 import os
-import subprocess
 
-def run_server():
-    try:
-        current_dir = os.path.dirname(sys.executable)  # 👈 핵심
-        server_path = os.path.join(current_dir, "Server.exe")
-
-        print("서버 경로:", server_path)
-
-        if os.path.exists(server_path):
-            subprocess.Popen(server_path, creationflags=subprocess.CREATE_NO_WINDOW)
-        else:
-            print("Server.exe not found")
-    except Exception as e:
-        print("Server 실행 오류:", e)
 
 def resource_path(relative_path):
     """PyInstaller 번들 및 일반 실행 모두에서 올바른 절대 경로를 반환합니다."""
@@ -281,7 +267,8 @@ def main():
                             attacker_info[1], defender_info[1],
                             attacker_info[0], defender_info[0],
                             player_ally_pieces=player_allies,
-                            opponent_ally_pieces=opponent_allies
+                            opponent_ally_pieces=opponent_allies,
+                            net=net if game_mode == "multi_net" else None
                         )
                         if game_mode == "multi_net" and gui.last_move:
                             net.send_move(gui.last_move[0], gui.last_move[1])
@@ -340,7 +327,8 @@ def main():
                                 defender_info[1], attacker_info[1],
                                 defender_info[0], attacker_info[0],
                                 player_ally_pieces=player_allies,
-                                opponent_ally_pieces=opponent_allies
+                                opponent_ally_pieces=opponent_allies,
+                                net=net
                             )
 
                 elif mtype == "promote":
@@ -550,7 +538,5 @@ def main():
     pygame.quit()
     sys.exit()
 
-
 if __name__ == "__main__":
-    run_server()
     main()
