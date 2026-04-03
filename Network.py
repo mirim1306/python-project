@@ -8,7 +8,7 @@ try:
 except ImportError:
     websocket = None
 
-SERVER_URL = "ws://172.30.3.45:10000"
+SERVER_URL = "wss://chesscard-server.onrender.com"
 
 
 class NetworkClient:

@@ -15,7 +15,7 @@ PORT = int(os.environ.get("PORT", 10000))
 # 빠른 매칭 대기열
 quick_queue = []
 
-# 방 목록: {code: [ws1, ws2]}
+# 방 목록: {code: {"players": [ws1], "event": asyncio.Event}}
 rooms = {}
 
 
@@ -72,25 +72,33 @@ async def handler(ws):
                 p1 = quick_queue.pop(0)
                 p2 = quick_queue.pop(0)
                 await start_game(p1, p2)
+            else:
+                # 상대방이 올 때까지 연결 유지
+                try:
+                    async for _ in ws:
+                        pass
+                except Exception:
+                    pass
+                finally:
+                    if ws in quick_queue:
+                        quick_queue.remove(ws)
 
         # ── 방 만들기 ───────────────────────────────────────────────────
         elif action == "create_room":
             code = gen_code()
             while code in rooms:
                 code = gen_code()
-            rooms[code] = [ws]
+            event = asyncio.Event()
+            rooms[code] = {"players": [ws], "event": event}
             await send(ws, {"type": "room_created", "code": code})
             print(f"[ROOM] 방 생성: {code}")
 
-            # 상대방 대기
-            while True:
-                if code in rooms and len(rooms[code]) == 2:
-                    p1, p2 = rooms.pop(code)
-                    await start_game(p1, p2)
-                    break
-                if code not in rooms:
-                    break
-                await asyncio.sleep(0.3)
+            # 상대방이 참가할 때까지 대기
+            await event.wait()
+
+            if code in rooms and len(rooms[code]["players"]) == 2:
+                p1, p2 = rooms.pop(code)["players"]
+                await start_game(p1, p2)
 
         # ── 방 참가 ────────────────────────────────────────────────────
         elif action == "join_room":
@@ -98,12 +106,13 @@ async def handler(ws):
             if code not in rooms:
                 await send(ws, {"type": "error", "message": "방을 찾을 수 없습니다."})
                 return
-            if len(rooms[code]) >= 2:
+            if len(rooms[code]["players"]) >= 2:
                 await send(ws, {"type": "error", "message": "방이 가득 찼습니다."})
                 return
-            rooms[code].append(ws)
+            rooms[code]["players"].append(ws)
             await send(ws, {"type": "room_joined", "code": code})
             print(f"[ROOM] 방 참가: {code}")
+            rooms[code]["event"].set()  # 방 만든 쪽 깨우기
 
     except Exception as e:
         print(f"[ERROR] {e}")
