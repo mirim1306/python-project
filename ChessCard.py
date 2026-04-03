@@ -4,7 +4,6 @@ import threading
 import copy
 import os
 
-
 def resource_path(relative_path):
     """PyInstaller 번들 및 일반 실행 모두에서 올바른 절대 경로를 반환합니다."""
     if hasattr(sys, '_MEIPASS'):
@@ -268,7 +267,8 @@ def main():
                             attacker_info[0], defender_info[0],
                             player_ally_pieces=player_allies,
                             opponent_ally_pieces=opponent_allies,
-                            net=net if game_mode == "multi_net" else None
+                            net=net if game_mode == "multi_net" else None,
+                            is_master=True  # 이동한 쪽이 마스터
                         )
                         if game_mode == "multi_net" and gui.last_move:
                             net.send_move(gui.last_move[0], gui.last_move[1])
@@ -281,8 +281,8 @@ def main():
                         if game_mode == "multi_net" and gui.last_move:
                             net.send_move(gui.last_move[0], gui.last_move[1])
 
-        # ── 네트워크 메시지 처리 ─────────────────────────────────────────
-        if net.connected or net_waiting:
+        # ── 네트워크 메시지 처리 (카드 게임 중에는 건너뜀) ──────────────
+        if not in_card_game and (net.connected or net_waiting):
             for msg in net.poll():
                 mtype = msg.get("type")
 
@@ -328,7 +328,8 @@ def main():
                                 defender_info[0], attacker_info[0],
                                 player_ally_pieces=player_allies,
                                 opponent_ally_pieces=opponent_allies,
-                                net=net
+                                net=net,
+                                is_master=False  # 이동 받은 쪽은 슬레이브
                             )
 
                 elif mtype == "promote":
