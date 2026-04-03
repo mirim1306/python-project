@@ -9,9 +9,10 @@ class CardBattle:
     def __init__(self, screen, player_piece_type, opponent_piece_type,
                  player_color="white", opponent_color="black",
                  player_ally_pieces=None, opponent_ally_pieces=None,
-                 net=None):
+                 net=None, is_master=True):
         self.screen = screen
-        self.net = net  # 멀티넷용 NetworkClient (None이면 싱글/AI)
+        self.net = net          # 멀티넷용 NetworkClient (None이면 싱글/AI)
+        self.is_master = is_master  # True: 계산 담당 / False: 카드만 전송
         self.player = SpecialEffectProcessor.create_player(player_piece_type, "Player", player_color)
         self.opponent = SpecialEffectProcessor.create_player(opponent_piece_type, "Opponent", opponent_color)
 
@@ -28,17 +29,13 @@ class CardBattle:
         self.timer_start_time = 0
         self.turn_time_limit = 10
 
-        # 체스판 위 각 진영의 실제 기물 목록 (킹 소환에 사용)
-        # 예: ['p', 'n', 'b'] — 킹 자신은 제외됨
         self.player_ally_pieces = list(player_ally_pieces) if player_ally_pieces else []
         self.opponent_ally_pieces = list(opponent_ally_pieces) if opponent_ally_pieces else []
 
-        # 소환 기물 사망 추적: (color, piece_char) 형태로 쌓임
-        # ChessCard에서 배틀 종료 후 이 목록을 읽어 체스판에서 제거
         self.dead_summoned_pieces = []
 
         self.game_log = []
-        self._net_opponent_card_name = None  # 네트워크로 수신한 상대 카드명
+        self._net_recv = None   # 네트워크로 수신한 메시지 저장
         self._start_new_turn()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -61,7 +58,6 @@ class CardBattle:
         if self.opponent.summoned_piece:
             self.opponent.summoned_piece.update_statuses(self.turn_number)
 
-        # 상태효과 도트로 소환 기물이 죽었을 때도 체크
         self._check_summoned_piece_death(self.player)
         self._check_summoned_piece_death(self.opponent)
 
@@ -77,15 +73,39 @@ class CardBattle:
 
     # ─────────────────────────────────────────────────────────────────────────
     def _check_summoned_piece_death(self, king_player):
-        """소환 기물 체력이 0 이하면 사망 처리 및 체스판 제거 목록에 추가."""
         sp = king_player.summoned_piece
         if sp and sp.health <= 0:
             self.game_log.append(
                 f"  {king_player.role}의 소환 기물({sp.piece_type.upper()}) 사망! 체스판에서 제거됩니다.")
-            # color 파악: player=white, opponent=black (CardBattle 생성 시 color 인자)
             color = 'w' if king_player.role == "Player" else 'b'
             self.dead_summoned_pieces.append((color, sp.piece_type))
             king_player.summoned_piece = None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def _poll_net(self):
+        """네트워크 메시지를 폴링해서 card_action을 _net_recv에 저장."""
+        if self.net and self.net.connected and self._net_recv is None:
+            for msg in self.net.poll():
+                if msg.get("type") == "card_action":
+                    self._net_recv = msg
+                    break
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def _wait_for_net(self, timeout_ms=15000):
+        """상대방 card_action 메시지가 올 때까지 대기. 수신된 메시지 반환."""
+        wait_start = pygame.time.get_ticks()
+        while True:
+            if self._net_recv is not None:
+                result = self._net_recv
+                self._net_recv = None
+                return result
+            if pygame.time.get_ticks() - wait_start > timeout_ms:
+                return None
+            self._poll_net()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+            pygame.time.wait(30)
 
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
@@ -96,11 +116,8 @@ class CardBattle:
             time_left = max(0.0,
                 self.turn_time_limit - (pygame.time.get_ticks() - self.timer_start_time) / 1000)
 
-            # 네트워크 메시지 폴링 (멀티넷)
-            if self.net and self.net.connected:
-                for msg in self.net.poll():
-                    if msg.get("type") == "card_action":
-                        self._net_opponent_card_name = str(msg.get("card_idx", -1))
+            # 네트워크 메시지 미리 폴링
+            self._poll_net()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -144,6 +161,7 @@ class CardBattle:
 
     # ─────────────────────────────────────────────────────────────────────────
     def _resolve_turn(self, time_left):
+        # ── 내 카드 결정 ──────────────────────────────────────────────────
         player_stunned = self.player.is_status_active('stun')
         if not player_stunned and self.player_selected_card_index != -1:
             self.player_played_card = self.player.play_card(self.player_selected_card_index)
@@ -155,47 +173,102 @@ class CardBattle:
             else:
                 self.game_log.append("플레이어: 시간 초과 → 카드 없음.")
 
-        # ── 멀티넷: 내 카드 전송 후 상대 카드 수신 대기 ────────────────
+        # ── 멀티넷 ────────────────────────────────────────────────────────
         if self.net and self.net.connected:
-            # 내 카드 정보 전송 (카드 전체 정보를 dict로)
-            if self.player_played_card:
-                card_data = self.player_played_card.to_dict()
+            my_card_idx = self.player_selected_card_index  # 이미 play_card로 손패에서 제거됨
+
+            if self.is_master:
+                # 마스터: 상대 카드 인덱스 수신 대기 → 계산 → 결과 전송
+                recv = self._wait_for_net()
+                opp_idx = recv.get("card_idx", -1) if recv else -1
+
+                opponent_stunned = self.opponent.is_status_active('stun')
+                if not opponent_stunned and opp_idx != -1 and 0 <= opp_idx < len(self.opponent.hand):
+                    self.opponent_played_card = self.opponent.play_card(opp_idx)
+                else:
+                    self.opponent_played_card = None
+                self.game_log.append(
+                    f"상대방: '{self.opponent_played_card.name if self.opponent_played_card else '없음'}' 카드 사용.")
+
+                # 내 카드 인덱스 전송 (슬레이브가 화면에 표시하도록)
+                self.net.send_card_action({
+                    "card_idx": my_card_idx,
+                    "player_card": self.player_played_card.name if self.player_played_card else "none",
+                    "opponent_card": self.opponent_played_card.name if self.opponent_played_card else "none",
+                })
+
             else:
-                card_data = None
-            self.net.send_card_action({"card_data": card_data})
+                # 슬레이브: 내 카드 인덱스 전송 → 마스터 결과 수신
+                self.net.send_card_action({"card_idx": my_card_idx})
 
-            # 상대 카드가 올 때까지 대기 (최대 15초)
-            wait_start = pygame.time.get_ticks()
-            while self._net_opponent_card_name is None:
-                if pygame.time.get_ticks() - wait_start > 15000:
-                    self._net_opponent_card_name = "timeout"
-                    break
-                for msg in self.net.poll():
-                    if msg.get("type") == "card_action":
-                        self._net_opponent_card_name = msg.get("card_data", "timeout")
-                # pygame 이벤트 처리 (화면 멈춤 방지)
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self._net_opponent_card_name = "timeout"
-                        break
-                pygame.time.wait(30)
+                recv = self._wait_for_net()
+                if recv:
+                    # 마스터가 보낸 결과로 화면 표시용 카드 설정
+                    p_name = recv.get("player_card", "none")
+                    o_name = recv.get("opponent_card", "none")
+                    # 슬레이브 입장에서 player=상대방, opponent=나
+                    # 화면 표시만 맞추면 되므로 이름으로 더미 카드 생성
+                    self.opponent_played_card = Card(o_name, 0, "attack", "") if o_name != "none" else None
+                    # player_played_card는 이미 위에서 설정됨
+                    self.game_log.append(
+                        f"상대방: '{self.opponent_played_card.name if self.opponent_played_card else '없음'}' 카드 사용.")
 
-            opp_card_data = self._net_opponent_card_name
-            self._net_opponent_card_name = None  # 초기화
+                    # 슬레이브는 실제 전투 계산을 건너뜀 (마스터가 이미 계산)
+                    self.gui.draw("Player", 0, self.player_selected_card_index,
+                                  self.player_played_card, self.opponent_played_card)
+                    pygame.display.flip()
+                    pygame.time.wait(1200)
 
-            if opp_card_data and opp_card_data != "timeout" and isinstance(opp_card_data, dict):
-                self.opponent_played_card = Card(
-                    name=opp_card_data["name"],
-                    power=opp_card_data["power"],
-                    effect_type=opp_card_data["effect_type"],
-                    description=opp_card_data["description"],
-                    effect=opp_card_data.get("effect")
-                )
-            else:
-                self.opponent_played_card = None
-            self.game_log.append(f"상대방: '{self.opponent_played_card.name if self.opponent_played_card else '없음'}' 카드 사용.")
+                    # 마스터로부터 턴 결과(전체 상태) 수신
+                    recv2 = self._wait_for_net()
+                    if recv2 and recv2.get("type2") == "turn_result":
+                        # 슬레이브 입장에서 player=상대방(마스터의 opponent), opponent=나(마스터의 player)
+                        # 마스터가 보낸 player_state = 마스터 자신(슬레이브의 opponent)
+                        # 마스터가 보낸 opponent_state = 슬레이브 자신(슬레이브의 player)
+                        def _apply_state(target, state):
+                            if not state:
+                                return
+                            target.health = state.get("health", target.health)
+                            target.max_health = state.get("max_health", target.max_health)
+                            target.attack = state.get("attack", target.attack)
+                            target.defense = state.get("defense", target.defense)
+                            target.piece_type = state.get("piece_type", target.piece_type)
+                            target.statuses = state.get("statuses", target.statuses)
+                            target.heal_stack_count = state.get("heal_stack_count", target.heal_stack_count)
+                            target.summon_boost_count = state.get("summon_boost_count", target.summon_boost_count)
+                            sp_data = state.get("summoned_piece")
+                            if sp_data:
+                                if not target.summoned_piece:
+                                    target.summoned_piece = SpecialEffectProcessor.create_piece_player(
+                                        sp_data["piece_type"])
+                                target.summoned_piece.piece_type = sp_data["piece_type"]
+                                target.summoned_piece.attack = sp_data["attack"]
+                                target.summoned_piece.defense = sp_data["defense"]
+                                target.summoned_piece.health = sp_data["health"]
+                                target.summoned_piece.max_health = sp_data["max_health"]
+                            else:
+                                target.summoned_piece = None
 
-        # ── 싱글/로컬: AI가 카드 선택 ────────────────────────────────────
+                        # 마스터의 player_state → 슬레이브의 opponent
+                        # 마스터의 opponent_state → 슬레이브의 player
+                        _apply_state(self.opponent, recv2.get("player_state"))
+                        _apply_state(self.player, recv2.get("opponent_state"))
+
+                        # 소환 기물 사망 동기화
+                        for dead in recv2.get("dead_summoned", []):
+                            if tuple(dead) not in self.dead_summoned_pieces:
+                                self.dead_summoned_pieces.append(tuple(dead))
+
+                        winner_role = recv2.get("winner")
+                        if winner_role:
+                            self.is_game_over = True
+                            self.winner = self.player if winner_role == "Player" else self.opponent
+                    if not self.is_game_over:
+                        pygame.time.wait(800)
+                        self._start_new_turn()
+                    return
+
+        # ── 싱글/로컬 또는 마스터의 실제 계산 ───────────────────────────
         else:
             opponent_stunned = self.opponent.is_status_active('stun')
             if not opponent_stunned and self.opponent.hand:
@@ -217,6 +290,40 @@ class CardBattle:
 
         self._process_selected_cards(self.player_played_card, self.opponent_played_card)
         self._check_game_over()
+
+        # 마스터면 턴 결과를 슬레이브에게 전송 (전체 상태 동기화)
+        if self.net and self.net.connected and self.is_master:
+            winner_role = self.winner.role if self.winner else None
+
+            def _player_state(p):
+                sp = None
+                if p.summoned_piece:
+                    sp = {
+                        "piece_type": p.summoned_piece.piece_type,
+                        "attack": p.summoned_piece.attack,
+                        "defense": p.summoned_piece.defense,
+                        "health": p.summoned_piece.health,
+                        "max_health": p.summoned_piece.max_health,
+                    }
+                return {
+                    "health": p.health,
+                    "max_health": p.max_health,
+                    "attack": p.attack,
+                    "defense": p.defense,
+                    "piece_type": p.piece_type,
+                    "summoned_piece": sp,
+                    "statuses": p.statuses,
+                    "heal_stack_count": p.heal_stack_count,
+                    "summon_boost_count": p.summon_boost_count,
+                }
+
+            self.net.send_card_action({
+                "type2": "turn_result",
+                "player_state": _player_state(self.player),
+                "opponent_state": _player_state(self.opponent),
+                "winner": winner_role,
+                "dead_summoned": list(self.dead_summoned_pieces),
+            })
 
         if not self.is_game_over:
             pygame.time.wait(800)
@@ -257,7 +364,6 @@ class CardBattle:
         p_is_defense = bool(player_card and player_card.effect_type == "defense")
         o_is_defense = bool(opponent_card and opponent_card.effect_type == "defense")
 
-        # ── 방어 카드: 킹만 보호, 소환 기물은 항상 피해를 받음 ────────────
         if p_is_defense:
             self.player.has_100_percent_defense = True
             self.game_log.append("플레이어: 방어 카드 → 킹 모든 공격 차단 (소환 기물은 그대로 맞음).")
@@ -265,7 +371,6 @@ class CardBattle:
             self.opponent.has_100_percent_defense = True
             self.game_log.append("상대방: 방어 카드 → 킹 모든 공격 차단 (소환 기물은 그대로 맞음).")
 
-        # ── 킹 체크메이트 특수 카드 먼저 처리 ────────────────────────────
         if player_card and player_card.effect_type == "special" and player_card.effect == "checkmate_summon":
             self._apply_special(player_card, self.player, self.opponent, o_is_defense, opponent_card,
                                 ally_pieces=self.player_ally_pieces)
@@ -274,14 +379,12 @@ class CardBattle:
             self._apply_special(opponent_card, self.opponent, self.player, p_is_defense, player_card,
                                 ally_pieces=self.opponent_ally_pieces)
 
-        # ── 나머지 특수 카드: 소환 기물에 우선순위로 적용 ────────────────
         if player_card and player_card.effect_type == "special" and player_card.effect != "checkmate_summon":
             self._apply_special(player_card, self.player, self.opponent, o_is_defense, opponent_card)
 
         if opponent_card and opponent_card.effect_type == "special" and opponent_card.effect != "checkmate_summon":
             self._apply_special(opponent_card, self.opponent, self.player, p_is_defense, player_card)
 
-        # ── 공격 카드 ─────────────────────────────────────────────────────
         if player_card and player_card.effect_type == "attack":
             self.game_log.append("플레이어 공격!")
             self._do_attack(attacker=self.player, defender=self.opponent)
@@ -290,7 +393,6 @@ class CardBattle:
             self.game_log.append("상대방 공격!")
             self._do_attack(attacker=self.opponent, defender=self.player)
 
-        # 소환 기물 사망 체크
         self._check_summoned_piece_death(self.player)
         self._check_summoned_piece_death(self.opponent)
 
@@ -301,16 +403,11 @@ class CardBattle:
     # ─────────────────────────────────────────────────────────────────────────
     def _apply_special(self, card, user, opponent, opponent_played_defense, opponent_card,
                        ally_pieces=None):
-        """특수 카드 효과 적용.
-        - opponent_played_defense: 상대가 방어 카드를 냈는지 → 특수 카드 효과(데미지/상태효과) 결정에 사용
-        - 소환 기물 있음: 피해/상태효과를 소환 기물에게 적용 (방어 카드 차단 없음)
-        - 소환 기물 없음: 방어 카드 있으면 킹 차단
-        """
         effect_result = SpecialEffectProcessor.use(
             card.effect,
             user_player=user,
             opponent_player=opponent,
-            opponent_played_defense=opponent_played_defense,  # 항상 원래 값 유지
+            opponent_played_defense=opponent_played_defense,
             opponent_card_type=(opponent_card.effect_type if opponent_card else None),
             all_ally_pieces=ally_pieces if ally_pieces is not None else self.player_ally_pieces,
             current_turn_number=self.turn_number
@@ -323,15 +420,12 @@ class CardBattle:
         dmg = effect_result.get("damage", 0)
         if dmg > 0:
             if has_summon:
-                # 소환 기물이 먼저 맞음 (방어 카드 무관)
                 sp = opponent.summoned_piece
                 actual = sp.take_damage(dmg, ignore_defense=effect_result.get("ignore_defense", False))
                 self.game_log.append(
                     f"  → 소환({sp.piece_type.upper()})에게 즉시 {actual} 데미지. "
                     f"소환 체력: {sp.health}/{sp.max_health}")
             else:
-                # 특수 카드 즉시 피해는 방어 카드와 무관하게 항상 들어감
-                # (방어 카드 여부는 Card.py에서 데미지값/상태효과 결정에만 사용)
                 saved = opponent.has_100_percent_defense
                 opponent.has_100_percent_defense = False
                 actual = opponent.take_damage(dmg, ignore_defense=effect_result.get("ignore_defense", False))
@@ -349,7 +443,6 @@ class CardBattle:
                 if has_summon:
                     opponent.summoned_piece.apply_status(**si)
                 else:
-                    # 상태효과는 방어 카드가 있으면 차단 (상대가 방어 카드를 낸 경우 statuses가 비어있음)
                     opponent.apply_status(**si)
 
         if effect_result.get("card_to_add_to_hand"):
@@ -360,40 +453,27 @@ class CardBattle:
 
     # ─────────────────────────────────────────────────────────────────────────
     def _do_attack(self, attacker, defender):
-        """공격 카드 처리.
-        - 방어 카드는 킹만 보호, 소환 기물은 항상 맞음
-        - 소환 기물 먼저 공격, 그 다음 킹 (킹은 방어 카드로 차단 가능)
-        """
         if attacker.summoned_piece and attacker.summoned_piece.health > 0:
             sp = attacker.summoned_piece
-            # 소환 기물 공격 → defender 소환 기물이 있으면 먼저 맞음, 없으면 킹 (킹은 방어 차단 가능)
             self._deal_damage(attacker=sp, defender=defender,
                               base_dmg=sp.attack,
                               label=f"{attacker.role}_소환({sp.piece_type.upper()})")
-            # 킹 공격 → 킹 방어 차단 가능
             self._deal_damage(attacker=attacker, defender=defender,
                               base_dmg=attacker.attack, label=attacker.role)
         else:
             self._deal_damage(attacker=attacker, defender=defender,
                               base_dmg=attacker.attack, label=attacker.role)
 
-        # 모든 공격 후 방어 플래그 소모
         defender.has_100_percent_defense = False
 
     def _deal_damage(self, attacker, defender, base_dmg, label):
-        """실제 데미지 적용.
-        - defender에 소환 기물 있으면 소환 기물이 먼저 맞음 (방어 카드 무관, 항상 맞음)
-        - 소환 기물 없으면 킹이 맞음 (방어 카드 있으면 차단)
-        """
         if defender.summoned_piece and defender.summoned_piece.health > 0:
-            # 소환 기물은 방어 카드와 무관하게 항상 맞음
             sp = defender.summoned_piece
             taken = sp.take_damage(base_dmg)
             self.game_log.append(
                 f"  {label} → 소환({sp.piece_type.upper()}) "
                 f"{taken} 데미지. 소환 체력: {sp.health}/{sp.max_health}")
         else:
-            # 소환 없음 → 킹이 맞음 (방어 카드 있으면 차단)
             if defender.has_100_percent_defense:
                 self.game_log.append(f"  {label} → {defender.role} 방어 카드로 차단!")
             else:
